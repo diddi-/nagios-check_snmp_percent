@@ -1,0 +1,147 @@
+#!/usr/bin/env perl 
+
+#####
+# check_snmp_value:
+# Check script for nagios that takes two OID and calculates the difference in percentage.
+# Used for checking free disk/mem space etc.
+#
+# Author: Diddi Oscarsson <diddi@diddi.se>
+#####
+
+use warnings;
+use strict;
+
+use Nagios::Plugin;
+use Net::SNMP;
+use Getopt::Long;
+use Data::Dumper;
+use POSIX;
+
+my $snmp_version;
+my $snmp_port;
+
+my $np = Nagios::Plugin->new(
+    usage => "Usage: %s -H <host> -o <OID> -C <community> -w <warning value> -c <critical value>");
+
+$np->add_arg(
+    spec => "warning|w=i",
+    help => "-w, --warning <integer>. Set what return value should raise a warning.",
+);
+
+$np->add_arg(
+    spec => "critical|c=i",
+    help => "-c, --critical <integer>. Set what return value should raise a critical.",
+);
+
+$np->add_arg(
+    spec => "host|H=s",
+    help => "-H, --host <hostname>. Set the host/ip to send snmp queries to.",
+    required => 1,
+);
+
+$np->add_arg(
+    spec => "total|T=s",
+    help => "-t, --total <oid>. OID that stores the total size (e.g. Total amount of memory in bytes)",
+    required => 1,
+);
+
+$np->add_arg(
+    spec => "used|u=s",
+    help => "-u, --used <oid>. OID that stores the used size (e.g. Allocated memory in bytes)",
+    required => 1,
+);
+
+$np->add_arg(
+    spec => "community|C=s",
+    help => "-C, --community <community>. Set the SNMP community to use for the query.",
+    required => 1,
+);
+
+$np->add_arg(
+    spec => "protocol|P=i",
+    help => "-v, --version <integer>. Set what SNMP version to be used, available versions are: 1 or 2. Default: 1",
+);
+
+$np->add_arg(
+    spec => "port|p=i",
+    help => "-p, --port <integer>. Set what SNMP port to be used. Possible values are between 0-65535. Default: 161",
+);
+
+$np->add_arg(
+    spec => "label|l=s",
+    help => "-l, --label <string>. Prepend value output with <string>. Does not affect return values to nagios.",
+);
+
+$np->getopts;
+
+if(not $np->opts->protocol) {
+    $snmp_version = 1;
+}elsif($np->opts->protocol < 1 or $np->opts->protocol > 2) {
+    printf("ERROR: SNMP version out of range. Possible values are 1 or 2. Got: %s\n", $np->opts->protocol);
+    exit(UNKNOWN);
+}else {
+    $snmp_version = $np->opts->protocol;
+}
+
+if(not $np->opts->port) {
+    $snmp_port = "161";
+}elsif($np->opts->port < 0 or $np->opts->port > 65535) {
+    printf("ERROR: SNMP port out of range. Possible values are between 0-65535. Got %s\n", $np->opts->port);
+    exit(UNKNOWN);
+}else {
+    $snmp_port = $np->opts->port;
+}
+
+my ($session, $error) = Net::SNMP->session(
+    -hostname => $np->opts->host,
+    -community => $np->opts->community,
+    -timeout   => "30",
+    -port      => $snmp_port,
+    -version   => $snmp_version,
+);
+
+if(not defined($session)) {
+    printf("ERROR: %s.\n", $error);
+    exit(UNKNOWN);
+}
+
+my $response = $session->get_request($np->opts->total);
+my $total_size = $response->{$np->opts->total};
+my $err = $session->error;
+my $label = undef;
+
+if($err) {
+    printf("ERROR: %s.\n", $err);
+    exit(UNKNOWN);
+}
+
+$response = $session->get_request($np->opts->used);
+my $used_size = $response->{$np->opts->used};
+$err = $session->error;
+
+if($err) {
+    printf("ERROR: %s.\n", $err);
+    exit(UNKNOWN);
+}
+
+my $available_size = ceil(($used_size/$total_size)*100);
+
+if($available_size >= $np->opts->warning and $available_size < $np->opts->critical) {
+    $label = "SNMP WARN: ";
+    $label = $np->opts->label if $np->opts->label;
+    printf("%s%s\n", $label, $available_size);
+    exit(WARNING);
+}
+
+if($available_size >= $np->opts->critical) {
+    $label = "SNMP CRIT: ";
+    $label = $np->opts->label if $np->opts->label;
+    printf("%s%s\n", $label, $available_size);
+    exit(CRITICAL);
+}
+
+$label = "SNMP OK: ";
+$label = $np->opts->label if $np->opts->label;
+printf("%s%s\n", $label, $available_size);
+exit(OK);
+
